@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/router";
 import { Button, Alert, Form, Modal, InputGroup } from "react-bootstrap";
 import {
@@ -12,52 +12,74 @@ import { useSession } from "next-auth/react";
 
 export default function Room() {
   const router = useRouter();
+  const { data: session, status: sessionStatus } = useSession();
+  const loading = sessionStatus === "loading";
 
-  const { data: session, status1 } = useSession();
-  const loading = status1 === "loading";
+  // Refs
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-  const [status, setStatus] = useState("Đang kết nối...");
   const clientRef = useRef(null);
   const roomRef = useRef(null);
   const localTrackRef = useRef(null);
 
-  // Thêm state cho các tính năng
+  // State
+  const [status, setStatus] = useState("Đang kết nối...");
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [roomLink, setRoomLink] = useState("");
   const [participants, setParticipants] = useState([]);
 
+  // Generate safe user ID
+  const getSafeUserId = useCallback(() => {
+    const { name: userNameFromQuery } = router.query;
+    try {
+      const name = session?.user?.name || userNameFromQuery;
+      return name
+        ? String(name).replace(/\s+/g, "-").toLowerCase()
+        : `guest-${Date.now()}`;
+    } catch (error) {
+      console.error("Error generating userId:", error);
+      return `guest-${Date.now()}`;
+    }
+  }, [router.query, session]);
+
+  // Initialize call
   useEffect(() => {
-    const { roomId, name: userNameFromQuery } = router.query;
-    // Xử lý userId trước khi sử dụng
-    // Sửa lại đoạn code xử lý userId như sau:
-    const userId = (
-      session?.user?.name ||
-      router.query.name ||
-      `guest-${Date.now()}`
-    )
-      ?.toString()
-      ?.replace(/\s+/g, "-") // Thay khoảng trắng bằng dấu gạch ngang
-      ?.toLowerCase();
+    if (!router.isReady) return;
 
-    console.log("Generated userId:", userId); // Kiểm tra giá trị userId
+    const roomId = router.query.roomId;
+    const userId = getSafeUserId();
 
-    if (!userId) {
-      setStatus("Không thể xác định userId");
+    if (!roomId || !userId) {
+      setStatus("Thiếu thông tin phòng hoặc người dùng");
       return;
     }
-    if (!roomId || !userId) return;
-    // Tạo link phòng để chia sẻ
-    const baseUrl = window.location.origin;
-    setRoomLink(`${baseUrl}/room?roomId=${roomId}&name=guest-${Date.now()}`);
+
+    // Generate room link
+    setRoomLink(
+      `${window.location.origin}/room?roomId=${roomId}&name=guest-${Date.now()}`
+    );
+
+    let localTrack;
+    let room;
+    let client;
+
+    // Lưu trữ các ref hiện tại vào biến cục bộ
+    const currentLocalVideo = localVideoRef.current;
+    const currentRemoteVideo = remoteVideoRef.current;
 
     const initCall = async () => {
       try {
         // 1. Get room token
         const res = await fetch(`/api/token?userId=${userId}&roomId=${roomId}`);
+        if (!res.ok) throw new Error("Failed to fetch token");
+
         const { token } = await res.json();
+        if (!token) {
+          setStatus("Không nhận được token");
+          return;
+        }
 
         const STRINGEE_SERVER_ADDRS = [
           "wss://v1.stringee.com:6899/",
@@ -65,70 +87,69 @@ export default function Room() {
         ];
 
         // 2. Initialize client
-        const client = new window.StringeeClient(STRINGEE_SERVER_ADDRS);
+        client = new window.StringeeClient(STRINGEE_SERVER_ADDRS);
         clientRef.current = client;
 
-        // Thêm vào phần initCall sau khi xác thực thành công
+        // Handle authentication
         client.on("authen", async (res) => {
-          console.log("Authentication response:", res);
-          if (res.r === 0) {
-            console.log("Authenticated successfully");
-            setStatus("Đã kết nối");
-
-            // Thêm code để lấy local stream với DroidCam
-            try {
-              // Hiển thị danh sách các thiết bị video để người dùng chọn
-              const devices = await navigator.mediaDevices.enumerateDevices();
-              const videoDevices = devices.filter(
-                (device) => device.kind === "videoinput"
-              );
-
-              // Hiển thị UI để chọn camera (bạn có thể tạo một modal hoặc dropdown)
-              console.log("Available cameras:", videoDevices);
-
-              // Lấy local stream (camera và mic)
-              const localStream = await navigator.mediaDevices.getUserMedia({
-                audio: true,
-                video: {
-                  width: 640,
-                  height: 480,
-                  // Nếu biết deviceId của DroidCam, bạn có thể chỉ định ở đây
-                  // deviceId: { exact: 'device-id-của-droidcam' }
-                },
-              });
-
-              // Hiển thị local stream
-              if (localVideoRef.current) {
-                localVideoRef.current.srcObject = localStream;
-              }
-
-              // Thêm local stream vào phòng
-              const joinResponse = await window.StringeeVideo.joinRoom(
-                client,
-                token
-              );
-              console.log("Join room response:", joinResponse);
-
-              const room = joinResponse.room;
-              const localTrack = new window.StringeeVideo.LocalVideoTrack(
-                localStream,
-                { audio: true }
-              );
-              await room.publish(localTrack);
-
-              // Xử lý remote stream
-              room.on("addtrack", (track) => {
-                if (track.kind === "video") {
-                  track.play(remoteVideoRef.current);
-                }
-              });
-            } catch (error) {
-              console.error("Error accessing media devices:", error);
-              setStatus("Lỗi truy cập camera: " + error.message);
-            }
-          } else {
+          if (res.r !== 0) {
             console.error("Authentication failed:", res.message);
-            setStatus("Lỗi xác thực: " + res.message);
+            setStatus(`Lỗi xác thực: ${res.message}`);
+            return;
+          }
+
+          console.log("Authenticated successfully");
+          setStatus("Đã kết nối");
+
+          try {
+            // Get media devices
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(
+              (device) => device.kind === "videoinput"
+            );
+            console.log("Available cameras:", videoDevices);
+
+            // Get local stream
+            const localStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: {
+                width: 640,
+                height: 480,
+              },
+            });
+
+            // Display local stream
+            if (currentLocalVideo) {
+              currentLocalVideo.srcObject = localStream;
+            }
+
+            // Join room
+            const joinResponse = await window.StringeeVideo.joinRoom(
+              client,
+              token
+            );
+            console.log("Join room response:", joinResponse);
+
+            room = joinResponse.room;
+            roomRef.current = room;
+
+            // Create and publish local track
+            localTrack = new window.StringeeVideo.LocalVideoTrack(localStream, {
+              audio: true,
+            });
+            localTrackRef.current = localTrack;
+
+            await room.publish(localTrack);
+
+            // Handle remote tracks
+            room.on("addtrack", (track) => {
+              if (track.kind === "video" && currentRemoteVideo) {
+                track.play(currentRemoteVideo);
+              }
+            });
+          } catch (error) {
+            console.error("Error accessing media devices:", error);
+            setStatus(`Lỗi truy cập thiết bị: ${error.message}`);
           }
         });
 
@@ -136,54 +157,70 @@ export default function Room() {
         client.connect(token);
       } catch (error) {
         console.error("Room initialization error:", error);
-        setStatus("Lỗi khởi tạo");
+        setStatus(`Lỗi khởi tạo: ${error.message}`);
       }
     };
 
     initCall();
 
+    // Cleanup function - sử dụng các biến cục bộ
     return () => {
-      if (localTrackRef.current) {
-        localTrackRef.current.stop();
+      if (localTrack) {
+        localTrack.stop();
+        if (currentLocalVideo) {
+          currentLocalVideo.srcObject = null;
+        }
       }
-      if (roomRef.current) {
-        roomRef.current.leave();
+      if (room) {
+        room.leave();
       }
-      if (clientRef.current) {
-        clientRef.current.disconnect();
+      if (client) {
+        client.disconnect();
       }
+
+      // Reset các ref
+      clientRef.current = null;
+      roomRef.current = null;
+      localTrackRef.current = null;
     };
-  }, [router.query, session]);
+  }, [router.isReady, router.query, getSafeUserId]);
 
-  // Hàm bật/tắt mic
-  const toggleMute = () => {
-    if (localTrackRef.current) {
-      if (isMuted) {
-        localTrackRef.current.unmuteMicrophone();
-      } else {
-        localTrackRef.current.muteMicrophone();
-      }
-      setIsMuted(!isMuted);
+  // Toggle microphone
+  const toggleMute = useCallback(() => {
+    if (!localTrackRef.current) return;
+
+    if (isMuted) {
+      localTrackRef.current.unmuteMicrophone();
+    } else {
+      localTrackRef.current.muteMicrophone();
     }
-  };
+    setIsMuted(!isMuted);
+  }, [isMuted]);
 
-  // Hàm bật/tắt camera
-  const toggleVideo = () => {
-    if (localTrackRef.current) {
-      if (isVideoOff) {
-        localTrackRef.current.enableVideo();
-      } else {
-        localTrackRef.current.disableVideo();
-      }
-      setIsVideoOff(!isVideoOff);
+  // Toggle video
+  const toggleVideo = useCallback(() => {
+    if (!localTrackRef.current) return;
+
+    if (isVideoOff) {
+      localTrackRef.current.enableVideo();
+    } else {
+      localTrackRef.current.disableVideo();
     }
-  };
+    setIsVideoOff(!isVideoOff);
+  }, [isVideoOff]);
 
-  // Hàm copy link phòng
-  const copyRoomLink = () => {
-    navigator.clipboard.writeText(roomLink);
-    alert("Đã sao chép link phòng vào clipboard!");
-  };
+  // Copy room link
+  const copyRoomLink = useCallback(() => {
+    if (!roomLink) return;
+    navigator.clipboard
+      .writeText(roomLink)
+      .then(() => alert("Đã sao chép link phòng!"))
+      .catch((err) => console.error("Copy failed:", err));
+  }, [roomLink]);
+
+  if (loading) {
+    return <div>Đang tải...</div>;
+  }
 
   return (
     <div className="container-fluid vh-100 p-0">

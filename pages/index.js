@@ -42,7 +42,7 @@
 //     </div>
 //   );
 // }
-
+import Image from "next/image";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { Form, Button, Alert } from "react-bootstrap";
@@ -113,12 +113,12 @@ export default function Home() {
                 </>
               ) : (
                 <div className="text-center mb-4">
-                  <img
+                  <Image
                     src={session.user.image}
                     alt={session.user.name}
                     className="rounded-circle mb-2"
-                    width="50"
-                    height="50"
+                    width={50}
+                    height={50}
                   />
                   <h5>Xin chào, {session.user.name}</h5>
                   <Button
