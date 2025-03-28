@@ -15,6 +15,7 @@ const eslintConfig = [
     rules: {
       "@next/next/no-img-element": "off", // Tắt rule cảnh báo thẻ img
       "react-hooks/exhaustive-deps": "error", // Giữ rule kiểm tra dependencies
+      "@typescript-eslint/no-explicit-any": "off",
     },
   },
 ];
